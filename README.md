@@ -1,4 +1,4 @@
-# TubeSwipe
+<h1 align="center"><img src="public/icon.svg" alt="" width="96"><br>TubeSwipe</h1>
 
 Swipe through new videos from YouTube channels and playlists, and send the ones you want to [MeTube](https://github.com/alexta69/metube).
 
