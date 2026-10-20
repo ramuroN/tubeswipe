@@ -1,16 +1,19 @@
 'use strict';
-// TubeSwipe im Browser: Kartenstapel mit Wischen, Quellen, Verlauf und doppelte Dateien.
+// TubeSwipe in the browser: card stack with swiping, sources, history and duplicate files.
 
 const $ = (sel) => document.querySelector(sel);
 const deck = $('#deck');
 
-let queue = []; // Videos in Reihenfolge, queue[0] ist die oberste Karte
+let t = I18N.translator('en');
+let locale = 'en';
+
+let queue = []; // videos in order, queue[0] is the top card
 let total = 0;
 let undoStack = [];
 let loading = false;
-let busy = false; // während eine Karte hinausfliegt
+let busy = false; // while a card flies out
 
-// ---------------------------------------------------------------- Hilfen
+// ---------------------------------------------------------------- Helpers
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -22,7 +25,7 @@ async function api(path, options = {}) {
   try {
     data = await res.json();
   } catch {
-    // Authentik-Weiterleitung oder Proxy-Fehlerseite
+    // login redirect or error page of a reverse proxy
   }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
@@ -39,6 +42,10 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 
+function presetLabel(id) {
+  return t('preset.' + id);
+}
+
 function fmtDuration(s) {
   if (!s && s !== 0) return '';
   s = Math.round(s);
@@ -49,24 +56,24 @@ function fmtDuration(s) {
 }
 
 function fmtAgo(ts) {
-  if (!ts) return 'nie';
+  if (!ts) return t('ago.never');
   const min = Math.round((Date.now() - ts) / 60000);
-  if (min < 1) return 'gerade eben';
-  if (min < 60) return `vor ${min} min`;
+  if (min < 1) return t('ago.now');
+  if (min < 60) return t('ago.min', { n: min });
   const h = Math.round(min / 60);
-  if (h < 24) return `vor ${h} Std.`;
+  if (h < 24) return t('ago.hours', { n: h });
   const d = Math.round(h / 24);
-  return d === 1 ? 'gestern' : `vor ${d} Tagen`;
+  return d === 1 ? t('ago.yesterday') : t('ago.days', { n: d });
 }
 
 function fmtTime(ts) {
-  return new Date(ts).toLocaleTimeString('de-CH', { hour: '2-digit', minute: '2-digit' });
+  return new Date(ts).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
 }
 
 function thumb(id, small) {
   const img = el('img', { alt: '', loading: small ? 'lazy' : 'eager', src: `https://i.ytimg.com/vi/${id}/${small ? 'mqdefault' : 'maxresdefault'}.jpg` });
   if (!small) {
-    // Ohne HD-Bild liefert YouTube einen 120 px breiten Platzhalter.
+    // Without an HD image, YouTube returns a 120 px wide placeholder.
     const fallback = () => {
       if (!img.src.includes('hqdefault')) img.src = `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
     };
@@ -85,7 +92,23 @@ function toast(text, withUndo) {
   toastTimer = setTimeout(() => ($('#toast').hidden = true), 4000);
 }
 
-// ---------------------------------------------------------------- Stapel
+// Texts in index.html carry their message key in data-i18n attributes.
+function translatePage() {
+  document.documentElement.lang = locale;
+  for (const node of document.querySelectorAll('[data-i18n]')) node.textContent = t(node.dataset.i18n);
+  for (const node of document.querySelectorAll('[data-i18n-html]')) node.innerHTML = t(node.dataset.i18nHtml);
+  for (const node of document.querySelectorAll('[data-i18n-title]')) node.title = t(node.dataset.i18nTitle);
+  for (const node of document.querySelectorAll('[data-i18n-aria]')) node.setAttribute('aria-label', t(node.dataset.i18nAria));
+  for (const node of document.querySelectorAll('[data-i18n-placeholder]')) node.placeholder = t(node.dataset.i18nPlaceholder);
+  $('#hint').textContent = t('hint', { alt: presetLabel('audio-mp3') });
+  $('#add-initial').replaceChildren(
+    ...[0, 5, 10, 25, -1].map((n) =>
+      el('option', { value: n, selected: n === 10 }, n === 0 ? t('sources.initial.none') : n < 0 ? t('sources.initial.all') : t('sources.initial.n', { n })),
+    ),
+  );
+}
+
+// ---------------------------------------------------------------- Stack
 
 async function loadQueue() {
   if (loading) return;
@@ -97,7 +120,7 @@ async function loadQueue() {
     for (const v of data.items) if (!known.has(v.id)) queue.push(v);
     render();
   } catch (e) {
-    toast('Laden fehlgeschlagen: ' + e.message);
+    toast(t('toast.loadFailed', { error: e.message }));
   } finally {
     loading = false;
   }
@@ -120,31 +143,32 @@ function render() {
     return;
   }
   $('#btn-alt').textContent = top.altType === 'audio' ? '♪' : '▶';
-  $('#btn-alt').title = `${top.altLabel} (↑)`;
-  $('#btn-yes').title = `Ja: ${top.yesLabel} (→)`;
-  $('#hint-alt').textContent = top.altLabel;
+  $('#btn-alt').title = t('btn.altTitle', { label: presetLabel(top.altPreset) });
+  $('#btn-yes').title = t('btn.yesTitle', { label: presetLabel(top.yesPreset) });
+  $('#hint').textContent = t('hint', { alt: presetLabel(top.altPreset) });
   if (next) deck.append(card(next, true));
   deck.append(card(top, false));
-  // Bild der übernächsten Karte schon laden
+  // Load the image of the card after next already
   if (queue[2]) new Image().src = `https://i.ytimg.com/vi/${queue[2].id}/maxresdefault.jpg`;
 }
 
 async function showEmptyInfo() {
   try {
     const s = await api('/api/status');
-    if (!s.sources) $('#empty-info').textContent = 'Noch keine Quellen. Füge unter «Quellen» einen Kanal oder eine Playlist hinzu.';
-    else if (s.polling) $('#empty-info').textContent = 'Quellen werden gerade geprüft …';
-    else $('#empty-info').textContent = s.nextPoll ? `Nächste Prüfung um ${fmtTime(s.nextPoll)} (alle ${s.pollMinutes} min).` : '';
+    if (!s.sources) $('#empty-info').textContent = t('stack.noSources');
+    else if (s.polling) $('#empty-info').textContent = t('stack.checking');
+    else $('#empty-info').textContent = s.nextPoll ? t('stack.nextCheck', { time: fmtTime(s.nextPoll), min: s.pollMinutes }) : '';
   } catch {
     $('#empty-info').textContent = '';
   }
 }
 
 function card(v, behind) {
-  const stampYes = el('div', { class: 'stamp yes' }, 'JA');
-  const stampNo = el('div', { class: 'stamp no' }, 'NEIN');
-  const stampAlt = el('div', { class: 'stamp alt' }, v.altType === 'audio' ? 'AUDIO' : 'VIDEO');
+  const stampYes = el('div', { class: 'stamp yes' }, t('stamp.yes'));
+  const stampNo = el('div', { class: 'stamp no' }, t('stamp.no'));
+  const stampAlt = el('div', { class: 'stamp alt' }, v.altType === 'audio' ? t('stamp.audio') : t('stamp.video'));
   const thumbBox = el('div', { class: 'thumb' }, thumb(v.id), v.duration ? el('span', { class: 'duration' }, fmtDuration(v.duration)) : null);
+  const source = v.source || t('sources.removed');
   const node = el(
     'div',
     { class: 'card' + (behind ? ' behind' : '') },
@@ -156,14 +180,14 @@ function card(v, behind) {
       'div',
       { class: 'info' },
       el('h2', {}, v.title),
-      el('div', { class: 'meta' }, [v.channel, v.channel && v.channel === v.source ? null : v.source].filter(Boolean).join(' · ')),
-      el('div', { class: 'meta' }, `gefunden ${fmtAgo(v.foundAt)} · Ja lädt ${v.yesLabel}`),
-      el('a', { href: `https://www.youtube.com/watch?v=${v.id}`, target: '_blank', rel: 'noopener' }, 'Auf YouTube öffnen ↗'),
+      el('div', { class: 'meta' }, [v.channel, v.channel && v.channel === source ? null : source].filter(Boolean).join(' · ')),
+      el('div', { class: 'meta' }, t('card.found', { ago: fmtAgo(v.foundAt), label: presetLabel(v.yesPreset) })),
+      el('a', { href: `https://www.youtube.com/watch?v=${v.id}`, target: '_blank', rel: 'noopener' }, t('card.open')),
     ),
   );
   if (behind) return node;
 
-  const play = el('button', { class: 'play', 'aria-label': 'Vorschau', onclick: () => preview(thumbBox, v.id) }, '▶');
+  const play = el('button', { class: 'play', 'aria-label': t('card.preview'), onclick: () => preview(thumbBox, v.id) }, '▶');
   thumbBox.append(play);
   node.thumbBox = thumbBox;
   node.video = v;
@@ -196,7 +220,7 @@ function drag(node, stamps) {
     try {
       node.setPointerCapture(e.pointerId);
     } catch {
-      // künstliche Zeiger (Tests) kennt der Browser nicht
+      // the browser does not know synthetic pointers (tests)
     }
     node.classList.remove('animate');
   });
@@ -248,10 +272,10 @@ async function decide(decision) {
 
   try {
     const r = await api('/api/decide', { method: 'POST', body: { id: v.id, decision } });
-    if (decision === 'no') toast('Verworfen', true);
-    else toast(`${decision === 'alt' ? v.altLabel : v.yesLabel}: geht in ${r.sendInSeconds} s an MeTube`, true);
+    if (decision === 'no') toast(t('toast.dismissed'), true);
+    else toast(t('toast.queued', { label: presetLabel(decision === 'alt' ? v.altPreset : v.yesPreset), s: r.sendInSeconds }), true);
   } catch (e) {
-    toast('Fehler: ' + e.message);
+    toast(t('toast.error', { error: e.message }));
     undoStack.pop();
     queue.unshift(v);
     total++;
@@ -268,10 +292,10 @@ async function undo() {
     queue = [v, ...queue.filter((q) => q.id !== v.id)];
     total++;
     render();
-    toast(r.alreadySent ? 'Zurück im Stapel – war schon bei MeTube, dort läuft der Download weiter' : 'Zurück im Stapel');
+    toast(r.alreadySent ? t('toast.backSent') : t('toast.back'));
   } catch (e) {
     undoStack.push(v);
-    toast('Fehler: ' + e.message);
+    toast(t('toast.error', { error: e.message }));
   }
 }
 
@@ -285,7 +309,7 @@ $('#toast-undo').onclick = () => {
 };
 $('#check-all').onclick = async () => {
   await api('/api/check', { method: 'POST', body: {} });
-  $('#empty-info').textContent = 'Quellen werden gerade geprüft …';
+  $('#empty-info').textContent = t('stack.checking');
 };
 
 document.addEventListener('keydown', (e) => {
@@ -304,7 +328,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ---------------------------------------------------------------- Quellen
+// ---------------------------------------------------------------- Sources
 
 let presets = [];
 
@@ -312,48 +336,53 @@ async function loadSources() {
   const data = await api('/api/sources');
   presets = data.presets;
   const addPreset = $('#add-preset');
-  if (!addPreset.options.length) addPreset.append(...presets.map((p) => el('option', { value: p.id }, p.label)));
+  if (!addPreset.options.length) addPreset.append(...presets.map((id) => el('option', { value: id }, presetLabel(id))));
 
   const list = $('#source-list');
   list.replaceChildren(
     ...data.sources.map((s) => {
-      const select = el('select', { 'aria-label': 'Bei Ja laden als', onchange: () => api(`/api/sources/${s.id}`, { method: 'PATCH', body: { preset: select.value } }) }, ...presets.map((p) => el('option', { value: p.id, selected: p.id === s.preset }, p.label)));
-      const checkBtn = el('button', {}, s.checking ? 'Prüft …' : 'Prüfen');
+      const select = el(
+        'select',
+        { 'aria-label': t('sources.preset'), onchange: () => api(`/api/sources/${s.id}`, { method: 'PATCH', body: { preset: select.value } }) },
+        ...presets.map((id) => el('option', { value: id, selected: id === s.preset }, presetLabel(id))),
+      );
+      const checkBtn = el('button', {}, s.checking ? t('sources.checkingNow') : t('sources.check'));
       checkBtn.disabled = s.checking;
       checkBtn.onclick = async () => {
         checkBtn.disabled = true;
-        checkBtn.textContent = 'Prüft …';
+        checkBtn.textContent = t('sources.checkingNow');
         try {
           const r = await api(`/api/sources/${s.id}`, { method: 'POST', body: {} });
-          toast(r.added ? `${r.added} neue Videos` : 'Nichts Neues');
+          toast(r.added ? t.n('sources.newVideos', r.added) : t('sources.nothingNew'));
           loadQueue();
         } catch (e) {
-          toast('Fehler: ' + e.message);
+          toast(t('toast.error', { error: e.message }));
         }
         loadSources();
       };
-      const pauseBtn = el('button', {}, s.paused ? 'Fortsetzen' : 'Pausieren');
+      const pauseBtn = el('button', {}, s.paused ? t('sources.resume') : t('sources.pause'));
       pauseBtn.onclick = async () => {
         await api(`/api/sources/${s.id}`, { method: 'PATCH', body: { paused: !s.paused } });
         loadSources();
       };
-      const delBtn = el('button', { class: 'danger' }, 'Entfernen');
+      const delBtn = el('button', { class: 'danger' }, t('sources.remove'));
       delBtn.onclick = async () => {
-        if (!confirm(`«${s.title}» entfernen? Offene Vorschläge daraus verschwinden, deine Ja/Nein bleiben gemerkt.`)) return;
+        if (!confirm(t('sources.confirmRemove', { title: s.title }))) return;
         await api(`/api/sources/${s.id}`, { method: 'DELETE', body: {} });
         queue = [];
         loadQueue();
         loadSources();
       };
-      const status = s.lastError ? el('span', { class: 'err' }, 'Fehler: ' + s.lastError) : `geprüft ${fmtAgo(s.lastCheck)}`;
+      const status = s.lastError ? el('span', { class: 'err' }, t('sources.error', { error: s.lastError })) : t('sources.checked', { ago: fmtAgo(s.lastCheck) });
+      const kind = s.kind === 'playlist' ? t('sources.kind.playlist') : t('sources.kind.channel');
       return el(
         'li',
         {},
         el(
           'div',
           { class: 'grow' },
-          el('div', { class: 'title' }, el('a', { href: s.url, target: '_blank', rel: 'noopener', style: 'color:inherit;text-decoration:none' }, s.title), s.paused ? ' (pausiert)' : ''),
-          el('div', { class: 'meta' }, `${s.kind === 'playlist' ? 'Playlist' : 'Kanal'} · ${s.counts.pending} offen · ${s.counts.yes} ja · ${s.counts.no} nein · `, status),
+          el('div', { class: 'title' }, el('a', { href: s.url, target: '_blank', rel: 'noopener', style: 'color:inherit;text-decoration:none' }, s.title), s.paused ? t('sources.paused') : ''),
+          el('div', { class: 'meta' }, t('sources.counts', { kind, pending: s.counts.pending, yes: s.counts.yes, no: s.counts.no }), status),
         ),
         el('div', { class: 'actions' }, select, checkBtn, pauseBtn, delBtn),
       );
@@ -362,7 +391,7 @@ async function loadSources() {
 }
 
 $('#add-url').addEventListener('input', (e) => {
-  // Playlists dienen meist als Eingangskorb: dann alles vorschlagen.
+  // Playlists usually serve as an inbox: then suggest everything.
   if (/[?&]list=/.test(e.target.value)) $('#add-initial').value = '-1';
 });
 
@@ -371,14 +400,14 @@ $('#add-form').addEventListener('submit', async (e) => {
   const btn = $('#add-btn');
   btn.disabled = true;
   $('#add-msg').className = 'muted';
-  $('#add-msg').textContent = 'MeTube liest die Quelle, das dauert ein paar Sekunden …';
+  $('#add-msg').textContent = t('sources.reading');
   try {
     const r = await api('/api/sources', {
       method: 'POST',
       body: { url: $('#add-url').value, initial: Number($('#add-initial').value), preset: $('#add-preset').value },
     });
     $('#add-msg').className = 'ok';
-    $('#add-msg').textContent = `«${r.source.title}» hinzugefügt, ${r.added} Videos im Stapel.`;
+    $('#add-msg').textContent = t('sources.added', { title: r.source.title, n: r.added });
     $('#add-url').value = '';
     loadSources();
     loadQueue();
@@ -390,35 +419,36 @@ $('#add-form').addEventListener('submit', async (e) => {
   }
 });
 
-// ---------------------------------------------------------------- Verlauf
+// ---------------------------------------------------------------- History
 
 async function loadHistory() {
   const { items } = await api('/api/history?limit=150');
   const list = $('#history-list');
   if (!items.length) {
-    list.replaceChildren(el('li', { class: 'muted' }, 'Noch keine Entscheidungen.'));
+    list.replaceChildren(el('li', { class: 'muted' }, t('history.empty')));
     return;
   }
   list.replaceChildren(
     ...items.map((v) => {
+      const label = v.preset ? presetLabel(v.preset) : '';
       let status;
-      if (v.status === 'no') status = el('span', { class: 'muted' }, 'verworfen');
-      else if (v.sentAt) status = el('span', { class: 'ok' }, `an MeTube: ${v.label}`);
-      else if (v.failed) status = el('span', { class: 'err' }, `fehlgeschlagen: ${v.error}`);
-      else if (v.error) status = el('span', { class: 'err' }, `neuer Versuch folgt: ${v.error}`);
-      else status = el('span', { class: 'muted' }, `wartet: ${v.label}`);
+      if (v.status === 'no') status = el('span', { class: 'muted' }, t('history.dismissed'));
+      else if (v.sentAt) status = el('span', { class: 'ok' }, t('history.sent', { label }));
+      else if (v.failed) status = el('span', { class: 'err' }, t('history.failed', { error: v.error }));
+      else if (v.error) status = el('span', { class: 'err' }, t('history.retrying', { error: v.error }));
+      else status = el('span', { class: 'muted' }, t('history.waiting', { label }));
 
-      const back = el('button', {}, 'Zurück in den Stapel');
+      const back = el('button', {}, t('history.back'));
       back.onclick = async () => {
         const r = await api('/api/undo', { method: 'POST', body: { id: v.id } });
-        toast(r.alreadySent ? 'Zurück im Stapel – war schon bei MeTube' : 'Zurück im Stapel');
+        toast(r.alreadySent ? t('history.backSent') : t('toast.back'));
         queue = [];
         loadQueue();
         loadHistory();
       };
       const actions = [back];
       if (v.failed) {
-        const retry = el('button', {}, 'Nochmal senden');
+        const retry = el('button', {}, t('history.retry'));
         retry.onclick = async () => {
           await api('/api/retry', { method: 'POST', body: { id: v.id } });
           setTimeout(loadHistory, 1500);
@@ -433,7 +463,7 @@ async function loadHistory() {
           'div',
           { class: 'grow' },
           el('div', { class: 'title' }, el('a', { href: `https://www.youtube.com/watch?v=${v.id}`, target: '_blank', rel: 'noopener', style: 'color:inherit;text-decoration:none' }, v.title)),
-          el('div', { class: 'meta' }, `${v.channel || v.source} · ${fmtAgo(v.decidedAt)} · `, status),
+          el('div', { class: 'meta' }, `${v.channel || v.source || t('sources.removed')} · ${fmtAgo(v.decidedAt)} · `, status),
         ),
         el('div', { class: 'actions' }, actions),
       );
@@ -441,18 +471,18 @@ async function loadHistory() {
   );
 }
 
-// ---------------------------------------------------------------- Doppelte
+// ---------------------------------------------------------------- Duplicates
 
 let dupTimer = null;
 
 function fmtSize(bytes) {
-  if (bytes >= 1e9) return (bytes / 1e9).toLocaleString('de-CH', { maximumFractionDigits: 1 }) + ' GB';
+  if (bytes >= 1e9) return (bytes / 1e9).toLocaleString(locale, { maximumFractionDigits: 1 }) + ' GB';
   if (bytes >= 1e6) return Math.round(bytes / 1e6) + ' MB';
   return Math.max(1, Math.round(bytes / 1e3)) + ' kB';
 }
 
 function fmtDate(ts) {
-  return new Date(ts).toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  return new Date(ts).toLocaleDateString(locale, { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
 function updateDupCount(n) {
@@ -464,35 +494,32 @@ async function loadDuplicates() {
   const groups = d.groups || [];
   updateDupCount(groups.length);
   clearTimeout(dupTimer);
-  // Während die Prüfung läuft, alle 2 s nachsehen.
+  // While a scan runs, look again every 2 s.
   if (d.scanning) dupTimer = setTimeout(() => loadDuplicates().catch(() => {}), 2000);
 
   $('#dup-scan').disabled = !!d.scanning;
   let info;
-  if (d.scanning) info = 'Prüfung läuft …';
-  else if (!d.scannedAt) info = `Noch nicht geprüft. Die Prüfung läuft alle ${d.dupHours} Std. von selbst.`;
+  if (d.scanning) info = t('dup.scanning');
+  else if (!d.scannedAt) info = t('dup.never', { h: d.dupHours });
   else {
-    info = `Geprüft ${fmtAgo(d.scannedAt)}: ${d.files} Dateien in ${(d.roots || []).join(', ') || 'keinem Ordner'}, ${d.withId} mit YouTube-ID.`;
-    if (d.crossKind) info += ` ${d.crossKind} gibt es als Video und als Audio, das zählt nicht als doppelt.`;
-    if (d.nextScan) info += ` Nächste Prüfung ${d.nextScan - Date.now() < 86400000 ? 'um ' + fmtTime(d.nextScan) : 'am ' + fmtDate(d.nextScan)}.`;
+    info = t('dup.scanned', { ago: fmtAgo(d.scannedAt), files: d.files, roots: (d.roots || []).join(', ') || t('dup.noRoots'), withId: d.withId });
+    if (d.crossKind) info += t('dup.crossKind', { n: d.crossKind });
+    if (d.nextScan) info += d.nextScan - Date.now() < 86400000 ? t('dup.nextAt', { time: fmtTime(d.nextScan) }) : t('dup.nextOn', { date: fmtDate(d.nextScan) });
   }
   $('#dup-info').replaceChildren(info);
-  if (d.error) $('#dup-info').append(el('span', { class: 'err' }, ` Letzte Prüfung fehlgeschlagen: ${d.error}`));
+  if (d.error) $('#dup-info').append(el('span', { class: 'err' }, t('dup.lastFailed', { error: d.error })));
   if (d.unreadableCount) {
-    $('#dup-info').append(
-      el('span', { class: 'err' }, ` ${d.unreadableCount} Ordner nicht lesbar: ${d.unreadable.join(', ')}${d.unreadableCount > d.unreadable.length ? ' …' : ''}`),
-    );
+    const list = d.unreadable.join(', ') + (d.unreadableCount > d.unreadable.length ? ' …' : '');
+    $('#dup-info').append(el('span', { class: 'err' }, t('dup.unreadable', { n: d.unreadableCount, list })));
   }
 
   const trash = d.trash || { files: 0, bytes: 0 };
-  $('#dup-trash').textContent = trash.files
-    ? `Im Papierkorb: ${trash.files} Dateien, ${fmtSize(trash.bytes)}. Geleert wird nur mit diesem Knopf.`
-    : 'Papierkorb ist leer.';
+  $('#dup-trash').textContent = trash.files ? t('dup.trash', { files: trash.files, size: fmtSize(trash.bytes) }) : t('dup.trashEmpty');
   $('#dup-empty').disabled = !trash.files || !!d.scanning;
 
   const list = $('#dup-list');
   if (!groups.length) {
-    list.replaceChildren(el('li', { class: 'muted' }, d.scannedAt ? 'Keine doppelten Dateien gefunden.' : 'Noch keine Funde.'));
+    list.replaceChildren(el('li', { class: 'muted' }, d.scannedAt ? t('dup.none') : t('dup.nothingYet')));
     return;
   }
   list.replaceChildren(
@@ -509,14 +536,14 @@ async function loadDuplicates() {
             { class: 'title' },
             el('a', { href: `https://www.youtube.com/watch?v=${g.id}`, target: '_blank', rel: 'noopener', style: 'color:inherit;text-decoration:none' }, g.title),
           ),
-          el('div', { class: 'meta muted' }, `${g.kind === 'audio' ? 'Audio' : 'Video'} · ${g.files.length} Dateien · ${g.id}`),
+          el('div', { class: 'meta muted' }, t('dup.group', { kind: g.kind === 'audio' ? t('kind.audio') : t('kind.video'), n: g.files.length, id: g.id })),
         ),
         el(
           'div',
           { class: 'dup-files' },
           ...g.files.map((f, i) => {
-            const age = i === 0 ? 'älteste' : i === g.files.length - 1 ? 'neuste' : '';
-            const extra = f.sidecars ? ` · ${f.sidecars} Begleitdatei${f.sidecars === 1 ? '' : 'en'}` : '';
+            const age = i === 0 ? t('dup.oldest') : i === g.files.length - 1 ? t('dup.newest') : '';
+            const extra = f.sidecars ? ' · ' + t.n('dup.sidecars', f.sidecars) : '';
             return el(
               'div',
               { class: 'dup-file' },
@@ -526,7 +553,7 @@ async function loadDuplicates() {
                 el('div', { class: 'path' }, `${f.root}/${f.rel}`),
                 el('div', { class: 'meta muted' }, `${fmtSize(f.size)} · ${fmtDate(f.mtime)}${age ? ' · ' + age : ''}${extra}`),
               ),
-              el('button', { class: 'danger', onclick: (e) => trashFile(f, e.currentTarget) }, 'In Papierkorb'),
+              el('button', { class: 'danger', onclick: (e) => trashFile(f, e.currentTarget) }, t('dup.toTrash')),
             );
           }),
         ),
@@ -536,16 +563,17 @@ async function loadDuplicates() {
 }
 
 async function trashFile(f, btn) {
-  const extra = f.sidecars ? ` samt ${f.sidecars} Begleitdatei${f.sidecars === 1 ? '' : 'en'}` : '';
-  if (!confirm(`«${f.root}/${f.rel}»${extra} in den Papierkorb verschieben?`)) return;
+  const filePath = `${f.root}/${f.rel}`;
+  const question = f.sidecars ? t('dup.confirmTrashWith', { path: filePath, sidecars: t.n('dup.sidecars', f.sidecars) }) : t('dup.confirmTrash', { path: filePath });
+  if (!confirm(question)) return;
   btn.disabled = true;
   try {
     const r = await api('/api/duplicates/delete', { method: 'POST', body: { root: f.root, rel: f.rel } });
-    toast(`In den Papierkorb verschoben (${r.moved} Datei${r.moved === 1 ? '' : 'en'})`);
+    toast(t.n('dup.moved', r.moved));
   } catch (e) {
     toast(e.message);
   }
-  loadDuplicates().catch((e) => toast('Laden fehlgeschlagen: ' + e.message));
+  loadDuplicates().catch((e) => toast(t('toast.loadFailed', { error: e.message })));
 }
 
 $('#dup-scan').onclick = async () => {
@@ -558,53 +586,77 @@ $('#dup-scan').onclick = async () => {
 };
 
 $('#dup-empty').onclick = async () => {
-  if (!confirm('Papierkorb endgültig leeren? Das lässt sich nicht rückgängig machen.')) return;
+  if (!confirm(t('dup.confirmEmpty'))) return;
   try {
     await api('/api/duplicates/empty-trash', { method: 'POST', body: {} });
-    toast('Papierkorb geleert');
+    toast(t('dup.emptied'));
   } catch (e) {
     toast(e.message);
   }
-  loadDuplicates().catch((e) => toast('Laden fehlgeschlagen: ' + e.message));
+  loadDuplicates().catch((e) => toast(t('toast.loadFailed', { error: e.message })));
 };
 
 // ---------------------------------------------------------------- Tabs
 
 function showTab(name) {
   for (const b of document.querySelectorAll('nav button')) b.classList.toggle('active', b.dataset.tab === name);
-  for (const t of document.querySelectorAll('.tab')) t.classList.toggle('active', t.id === 'tab-' + name);
+  for (const tab of document.querySelectorAll('.tab')) tab.classList.toggle('active', tab.id === 'tab-' + name);
   const load = { stack: loadQueue, sources: loadSources, history: loadHistory, duplicates: loadDuplicates }[name];
-  Promise.resolve(load()).catch((e) => toast('Laden fehlgeschlagen: ' + e.message));
+  Promise.resolve(load()).catch((e) => toast(t('toast.loadFailed', { error: e.message })));
   try {
     localStorage.setItem('tubeswipe-tab', name);
   } catch {
-    // privates Fenster
+    // private window
   }
 }
 
 for (const b of document.querySelectorAll('nav button')) b.onclick = () => showTab(b.dataset.tab);
 
-let startTab = 'stack';
-try {
-  startTab = localStorage.getItem('tubeswipe-tab') || 'stack';
-} catch {
-  // privates Fenster
-}
-showTab(document.getElementById('tab-' + startTab) ? startTab : 'stack');
-api('/api/status')
-  .then((s) => updateDupCount(s.duplicates))
-  .catch(() => {});
-
-// Neue Videos aus den stündlichen Prüfungen nachladen, ohne die Karte oben zu wechseln.
-setInterval(async () => {
-  if (document.hidden) return;
+async function start() {
+  let config = { language: 'auto', duplicates: false };
   try {
-    const s = await api('/api/status');
-    total = s.pending;
-    updateCount();
-    updateDupCount(s.duplicates);
-    if (queue.length < 4 && s.pending > queue.length) loadQueue();
+    config = await api('/api/config');
   } catch {
-    // nächster Versuch in 30 s
+    // keep the defaults; the tabs report their own errors
   }
-}, 30000);
+  const browser = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language];
+  const lang = config.language !== 'auto' ? config.language : I18N.pick(browser);
+  // Keep the regional variant for dates and numbers (de-CH, en-GB …) when it matches.
+  locale = browser.find((l) => String(l).toLowerCase().split('-')[0] === lang) || lang;
+  t = I18N.translator(lang);
+  translatePage();
+
+  if (!config.duplicates) {
+    $('nav button[data-tab="duplicates"]').remove();
+    $('#tab-duplicates').remove();
+  }
+
+  let startTab = 'stack';
+  try {
+    startTab = localStorage.getItem('tubeswipe-tab') || 'stack';
+  } catch {
+    // private window
+  }
+  showTab(document.getElementById('tab-' + startTab) ? startTab : 'stack');
+  if (config.duplicates) {
+    api('/api/status')
+      .then((s) => updateDupCount(s.duplicates))
+      .catch(() => {});
+  }
+
+  // Pick up new videos from the regular checks without changing the top card.
+  setInterval(async () => {
+    if (document.hidden) return;
+    try {
+      const s = await api('/api/status');
+      total = s.pending;
+      updateCount();
+      if (config.duplicates) updateDupCount(s.duplicates);
+      if (queue.length < 4 && s.pending > queue.length) loadQueue();
+    } catch {
+      // next try in 30 s
+    }
+  }, 30000);
+}
+
+start();

@@ -1,34 +1,47 @@
 'use strict';
-// TubeSwipe: schlägt neue Videos aus YouTube-Kanälen und -Playlists als Karten
-// vor. Ja schickt das Video an MeTube (/add), Nein verwirft es für immer.
-// Die Einträge einer Quelle liest MeTube selbst aus (/browse: yt-dlp ohne
-// Download), darum braucht dieser Container kein eigenes yt-dlp.
-// Keine Abhängigkeiten ausser Node; der ganze Zustand liegt in DATA_DIR/state.json.
+// TubeSwipe: suggests new videos from YouTube channels and playlists as cards.
+// Yes sends the video to MeTube (/add), no dismisses it for good. MeTube itself
+// lists the entries of a source (/browse: yt-dlp without downloading), so this
+// container needs no yt-dlp of its own.
+// No dependencies besides Node; the whole state lives in DATA_DIR/state.json.
 
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const i18n = require('./public/i18n.js');
 
 const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const METUBE_URL = (process.env.METUBE_URL || 'http://metube:8081').replace(/\/+$/, '');
 const POLL_MINUTES = Math.max(5, Number(process.env.POLL_MINUTES || 60));
-// Kanäle liefern die neusten Videos zuerst; mehr als so viele neue zwischen
-// zwei Prüfungen gibt es praktisch nie. Playlists werden immer ganz gelesen.
+// Channels list the newest videos first; more new ones than this between two
+// checks practically never happen. Playlists are always read in full.
 const CHANNEL_LIMIT = Math.max(5, Number(process.env.CHANNEL_LIMIT || 50));
-// So lange lässt sich ein Ja zurücknehmen, bevor es an MeTube geht.
+// How long a yes can be taken back before it goes to MeTube.
 const SEND_DELAY_MS = Math.max(0, Number(process.env.SEND_DELAY_SECONDS ?? 8)) * 1000;
+// "auto" follows the browser (Accept-Language), "en" or "de" fixes the language.
+// Not LANGUAGE, which gettext uses on many Linux systems.
+const LANGUAGE = i18n.LANGUAGES.includes(String(process.env.UI_LANGUAGE || '').toLowerCase()) ? process.env.UI_LANGUAGE.toLowerCase() : 'auto';
+// The duplicates tab scans and moves files in MEDIA_DIR, so it is off unless asked for.
+const DUPLICATES = /^(1|true|yes|on)$/i.test(process.env.DUPLICATES || '');
+const AUTH_USER = process.env.AUTH_USER || '';
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || '';
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const COMMIT = readCommit();
 
+if (!AUTH_USER !== !AUTH_PASSWORD) {
+  console.error('Set both AUTH_USER and AUTH_PASSWORD, or neither.');
+  process.exit(1);
+}
+
 const DOWNLOAD_PRESETS = {
-  'video-best': { download_type: 'video', format: 'any', quality: 'best', label: 'Video, beste' },
-  'video-1440': { download_type: 'video', format: 'any', quality: '1440', label: 'Video 1440p' },
-  'video-1080': { download_type: 'video', format: 'any', quality: '1080', label: 'Video 1080p' },
-  'video-720': { download_type: 'video', format: 'any', quality: '720', label: 'Video 720p' },
-  'audio-mp3': { download_type: 'audio', format: 'mp3', quality: 'best', label: 'Audio MP3' },
+  'video-best': { download_type: 'video', format: 'any', quality: 'best' },
+  'video-1440': { download_type: 'video', format: 'any', quality: '1440' },
+  'video-1080': { download_type: 'video', format: 'any', quality: '1080' },
+  'video-720': { download_type: 'video', format: 'any', quality: '720' },
+  'audio-mp3': { download_type: 'audio', format: 'mp3', quality: 'best' },
 };
 
 function readCommit() {
@@ -39,7 +52,7 @@ function readCommit() {
   }
 }
 
-// ---------------------------------------------------------------- Zustand
+// ---------------------------------------------------------------- State
 
 let state = loadState();
 let saveTimer = null;
@@ -50,7 +63,7 @@ function loadState() {
     const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
     return { sources: s.sources || [], videos: s.videos || {}, seq: s.seq || 0, duplicates: s.duplicates || null };
   } catch (e) {
-    // Eine kaputte Datei nicht mit einem leeren Stand überschreiben.
+    // Never overwrite a broken file with an empty state.
     if (e.code !== 'ENOENT') throw e;
     return { sources: [], videos: {}, seq: 0, duplicates: null };
   }
@@ -81,7 +94,8 @@ function videoIdFrom(url) {
   return m ? m[1] : null;
 }
 
-// Macht aus dem, was man aus der YouTube-App kopiert, eine eindeutige Quelle.
+// Turns whatever is copied from the YouTube app into one unique source.
+// Errors are message keys for the caller to translate.
 function normalizeSource(input) {
   let text = String(input || '').trim();
   if (text.startsWith('@')) text = 'https://www.youtube.com/' + text;
@@ -89,24 +103,22 @@ function normalizeSource(input) {
   try {
     u = new URL(text);
   } catch {
-    return { error: 'Das ist keine Adresse.' };
+    return { error: 'err.notUrl' };
   }
   if (!/^((www|m|music)\.)?youtube\.com$/.test(u.hostname)) {
-    return { error: 'Nur Adressen von youtube.com.' };
+    return { error: 'err.onlyYoutube' };
   }
   const list = u.searchParams.get('list');
   if (list) {
-    if (list === 'WL' || list === 'LL') {
-      return { error: '«Später ansehen» und «Mag ich» sind immer privat. Nimm eine nicht gelistete Playlist.' };
-    }
+    if (list === 'WL' || list === 'LL') return { error: 'err.privateList' };
     return { kind: 'playlist', key: 'list:' + list, url: 'https://www.youtube.com/playlist?list=' + encodeURIComponent(list) };
   }
   const m = u.pathname.match(/^\/(@[^/]+|channel\/[\w-]+|c\/[^/]+|user\/[^/]+)/);
   if (m) {
-    // Der Tab «Videos» lässt Shorts und Livestreams weg.
+    // The "Videos" tab leaves out Shorts and live streams.
     return { kind: 'channel', key: decodeURIComponent(m[1]).toLowerCase(), url: 'https://www.youtube.com/' + m[1] + '/videos' };
   }
-  return { error: 'Bitte einen Kanal (…/@name) oder eine Playlist (…?list=…) einfügen.' };
+  return { error: 'err.needSource' };
 }
 
 async function metube(route, body, timeoutMs) {
@@ -122,14 +134,14 @@ async function metube(route, body, timeoutMs) {
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error(`MeTube ${route}: unerwartete Antwort`);
+    throw new Error(`MeTube ${route}: unexpected response`);
   }
-  if (data.status === 'error') throw new Error(data.msg || `MeTube ${route}: Fehler`);
+  if (data.status === 'error') throw new Error(data.msg || `MeTube ${route}: error`);
   return data;
 }
 
-// In Playlists stammen die Videos aus verschiedenen Kanälen; /browse nennt den
-// Kanal nicht, oEmbed schon (ohne API-Key).
+// Videos in a playlist come from different channels; /browse does not name the
+// channel, oEmbed does (without an API key).
 async function channelOf(id) {
   try {
     const watch = 'https://www.youtube.com/watch?v=' + id;
@@ -143,9 +155,9 @@ async function channelOf(id) {
   }
 }
 
-// ---------------------------------------------------------------- Prüfen
+// ---------------------------------------------------------------- Checking
 
-let checking = null; // id der Quelle, die gerade geprüft wird
+let checking = null; // id of the source being checked right now
 let lastPollAt = 0;
 
 async function checkSource(src) {
@@ -162,18 +174,18 @@ async function checkSource(src) {
       entries.push({ id, title: e.title || id, duration: typeof e.duration === 'number' ? e.duration : null });
     }
 
-    // Beim ersten Lesen nur die gewünschte Zahl bestehender Videos vorschlagen,
-    // den Rest als bekannt merken. Kanäle: die ersten (neusten), Playlists: die
-    // letzten (neu hinzugefügte landen bei YouTube standardmässig hinten).
+    // On the first read, suggest only the requested number of existing videos
+    // and remember the rest as known. Channels: the first (newest) ones,
+    // playlists: the last ones (YouTube appends new entries at the end by default).
     let propose = new Set(entries.map((e) => e.id));
     if (!src.initialized && src.initial >= 0) {
       const pick = src.kind === 'playlist' ? entries.slice(Math.max(0, entries.length - src.initial)) : entries.slice(0, src.initial);
       propose = new Set(pick.map((e) => e.id));
     }
 
-    // Neu ist, was diese Quelle beim letzten Mal noch nicht hatte. So taucht ein
-    // Video, das bei einem Kanal als alter Bestand übersprungen wurde, trotzdem
-    // auf, sobald es in den Eingangskorb (eine Playlist) kommt.
+    // New is what this source did not have last time. A video that was skipped
+    // as old stock of a channel still shows up once it lands in the inbox (a
+    // playlist).
     const seenBefore = new Set(src.seen || []);
     const now = Date.now();
     let added = 0;
@@ -231,7 +243,7 @@ async function pollDue(force) {
     try {
       await checkSource(src);
     } catch (e) {
-      console.warn(`Prüfen fehlgeschlagen: ${src.url}: ${e.message}`);
+      console.warn(`Check failed: ${src.url}: ${e.message}`);
     }
   }
 }
@@ -242,7 +254,7 @@ function poll(force) {
   return polling;
 }
 
-// ---------------------------------------------------------------- Senden
+// ---------------------------------------------------------------- Sending
 
 let sending = false;
 
@@ -268,7 +280,7 @@ async function sendDue() {
           },
           120000,
         );
-        // Zwischen dem Abschicken und der Antwort kann «Zurück» gekommen sein.
+        // "Undo" may have come in between sending and the answer.
         if (v.status === 'yes') {
           v.sentAt = Date.now();
           v.error = null;
@@ -278,7 +290,7 @@ async function sendDue() {
         v.error = e.message;
         if (v.attempts >= 3) v.failed = true;
         else v.sendAt = Date.now() + v.attempts * 60000;
-        console.warn(`An MeTube schicken fehlgeschlagen: ${v.id}: ${e.message}`);
+        console.warn(`Sending to MeTube failed: ${v.id}: ${e.message}`);
       }
       save();
     }
@@ -287,13 +299,13 @@ async function sendDue() {
   }
 }
 
-// ---------------------------------------------------------------- Doppelte
+// ---------------------------------------------------------------- Duplicates
 
-// Sucht in den Medienordnern (je ein Unterordner von MEDIA_DIR ist eine Wurzel)
-// Dateien mit derselben YouTube-ID und derselben Art. Gelöscht wird nie direkt:
-// «In Papierkorb» verschiebt in <Wurzel>/.tubeswipe-trash, geleert wird nur
-// auf Knopfdruck. Jede Wurzel hat ihren eigenen Papierkorb, weil die Wurzeln
-// getrennte Mounts sind und rename über Mounts hinweg nicht geht.
+// Looks in the media folders (each subfolder of MEDIA_DIR is one root) for files
+// with the same YouTube ID and the same kind. Nothing is deleted directly:
+// "Move to trash" moves into <root>/.tubeswipe-trash, which is only emptied on
+// request. Every root has its own trash because roots are usually separate
+// mounts and rename does not work across mounts.
 const MEDIA_DIR = path.resolve(process.env.MEDIA_DIR || '/media');
 const DUP_HOURS = Math.max(1, Number(process.env.DUP_HOURS) || 24);
 const TRASH_DIR = '.tubeswipe-trash';
@@ -322,9 +334,9 @@ function stemOf(name) {
   return name.slice(0, name.length - path.extname(name).length);
 }
 
-// Begleitdateien (.nfo, .info.json, .webp, -poster.webp …) heissen wie das
-// Medium ohne Endung. Gehört eine Datei zu einem längeren Stamm, ist sie nicht
-// von diesem Medium.
+// Sidecar files (.nfo, .info.json, .webp, -poster.webp …) are named like the
+// media file without its extension. A file that belongs to a longer stem is not
+// one of this media file's.
 function sidecarsOf(names, stem) {
   const stems = names.filter(mediaKind).map(stemOf);
   return names.filter((n) => {
@@ -455,7 +467,7 @@ async function runDupScan() {
     }
     const groups = [...byKey.values()].filter((g) => g.files.length >= 2);
     for (const g of groups) g.files.sort((a, b) => a.mtime - b.mtime);
-    groups.sort((a, b) => a.title.localeCompare(b.title, 'de'));
+    groups.sort((a, b) => a.title.localeCompare(b.title));
     state.duplicates = {
       scannedAt: started,
       durationMs: Date.now() - started,
@@ -469,12 +481,12 @@ async function runDupScan() {
       trash: await trashStats(roots),
       error: null,
     };
-    console.log(`Doppelte: ${groups.length} Gruppen in ${scan.files} Dateien (${state.duplicates.durationMs} ms)`);
+    console.log(`Duplicates: ${groups.length} groups in ${scan.files} files (${state.duplicates.durationMs} ms)`);
   } catch (e) {
-    // Die alten Funde stehen lassen, aber nicht sofort wieder prüfen.
+    // Keep the old results, but do not scan again right away.
     const old = state.duplicates || { roots: [], files: 0, withId: 0, groups: [], crossKind: 0, unreadable: [], unreadableCount: 0, trash: { files: 0, bytes: 0 } };
     state.duplicates = { ...old, scannedAt: started, durationMs: Date.now() - started, error: e.message };
-    console.warn(`Doppelte prüfen fehlgeschlagen: ${e.message}`);
+    console.warn(`Duplicate scan failed: ${e.message}`);
   }
   save();
 }
@@ -517,30 +529,25 @@ async function moveFile(from, to) {
   }
 }
 
-function noPermission(where) {
-  return [
-    403,
-    {
-      error: `Keine Schreibrechte im Ordner «${where}». TubeSwipe läuft als UID 1000 (green) und darf dort nichts verschieben; Besitzer auf green ändern, siehe README.`,
-    },
-  ];
+function noPermission(where, t) {
+  return [403, { error: t('err.noPermission', { where }) }];
 }
 
 let trashing = false;
 
-async function trashDuplicate(root, rel) {
-  if (dupScanning) return [409, { error: 'Die Prüfung läuft gerade. Gleich nochmals versuchen.' }];
-  if (trashing) return [409, { error: 'Es wird gerade eine andere Datei verschoben.' }];
-  if (typeof root !== 'string' || typeof rel !== 'string' || !root || !rel) return [400, { error: 'root und rel fehlen' }];
+async function trashDuplicate(root, rel, t) {
+  if (dupScanning) return [409, { error: t('err.scanRunning') }];
+  if (trashing) return [409, { error: t('err.moving') }];
+  if (typeof root !== 'string' || typeof rel !== 'string' || !root || !rel) return [400, { error: 'root and rel are required' }];
   const rootDir = path.join(MEDIA_DIR, root);
   const file = path.resolve(rootDir, rel);
   const inside = path.relative(rootDir, file).split(path.sep);
   if (path.dirname(rootDir) !== MEDIA_DIR || root.startsWith('.') || !file.startsWith(rootDir + path.sep) || inside[0] === TRASH_DIR) {
-    return [400, { error: 'Ungültiger Pfad' }];
+    return [400, { error: t('err.invalidPath') }];
   }
   const d = state.duplicates;
   if (!d || !d.groups.some((g) => g.files.some((f) => f.root === root && f.rel === rel))) {
-    return [404, { error: 'Diese Datei steht nicht in den Funden.' }];
+    return [404, { error: t('err.notInResults') }];
   }
   trashing = true;
   const relDir = inside.slice(0, -1).join('/');
@@ -551,14 +558,14 @@ async function trashDuplicate(root, rel) {
       size = (await fsp.stat(file)).size;
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
-      return [410, { error: 'Die Datei gibt es nicht mehr.', left: dropDuplicate(root, rel) }];
+      return [410, { error: t('err.fileGone'), left: dropDuplicate(root, rel) }];
     }
     const dir = path.dirname(file);
     const names = await fsp.readdir(dir);
     const base = path.basename(file);
     const stem = stemOf(base);
-    // Teilen sich zwei Medien einen Stamm (webm und mp4), bleiben die
-    // Begleitdateien beim verbleibenden.
+    // When two media files share a stem (webm and mp4), the sidecar files stay
+    // with the remaining one.
     const shared = names.some((n) => n !== base && mediaKind(n) && stemOf(n) === stem);
     const moving = [base, ...(shared ? [] : sidecarsOf(names, stem))];
 
@@ -569,7 +576,7 @@ async function trashDuplicate(root, rel) {
     try {
       await fsp.mkdir(target, { recursive: true });
     } catch (e) {
-      if (e.code === 'EACCES' || e.code === 'EPERM') return noPermission(root);
+      if (e.code === 'EACCES' || e.code === 'EPERM') return noPermission(root, t);
       throw e;
     }
     let moved = 0;
@@ -579,9 +586,9 @@ async function trashDuplicate(root, rel) {
         moved++;
       } catch (e) {
         if (e.code === 'ENOENT' && n !== base) continue;
-        if (moved === 0 && (e.code === 'EACCES' || e.code === 'EPERM')) return noPermission(where);
+        if (moved === 0 && (e.code === 'EACCES' || e.code === 'EPERM')) return noPermission(where, t);
         if (moved === 0) throw e;
-        console.warn(`Begleitdatei nicht verschoben: ${where}/${n}: ${e.message}`);
+        console.warn(`Sidecar file not moved: ${where}/${n}: ${e.message}`);
       }
     }
     if (dir !== rootDir) await fsp.rmdir(dir).catch(() => {});
@@ -594,8 +601,8 @@ async function trashDuplicate(root, rel) {
   }
 }
 
-async function emptyTrash() {
-  if (dupScanning || trashing) return [409, { error: 'Die Prüfung läuft gerade. Gleich nochmals versuchen.' }];
+async function emptyTrash(t) {
+  if (dupScanning || trashing) return [409, { error: t('err.scanRunning') }];
   const errors = [];
   let roots;
   try {
@@ -615,11 +622,25 @@ async function emptyTrash() {
     state.duplicates.trash = trash;
     save();
   }
-  if (errors.length) return [500, { error: 'Papierkorb nicht ganz geleert: ' + errors.join(', '), trash }];
+  if (errors.length) return [500, { error: t('err.trashNotEmpty', { errors: errors.join(', ') }), trash }];
   return { ok: true, trash };
 }
 
 // ---------------------------------------------------------------- API
+
+// The preset for yes and the other format offered by swiping up.
+function presetPair(src) {
+  const yes = src && DOWNLOAD_PRESETS[src.preset] ? src.preset : 'video-best';
+  const alt = DOWNLOAD_PRESETS[yes].download_type === 'audio' ? 'video-best' : 'audio-mp3';
+  return { yes, alt };
+}
+
+// Decisions made before presets were stored by id only carry the MeTube fields.
+function presetIdOf(options) {
+  if (DOWNLOAD_PRESETS[options.preset]) return options.preset;
+  const hit = Object.entries(DOWNLOAD_PRESETS).find(([, p]) => p.download_type === options.download_type && p.format === options.format && p.quality === options.quality);
+  return hit ? hit[0] : 'video-best';
+}
 
 function sourceView(src) {
   const counts = { pending: 0, yes: 0, no: 0 };
@@ -632,8 +653,7 @@ function sourceView(src) {
 
 function videoView(v) {
   const src = state.sources.find((s) => s.id === v.sourceId);
-  const preset = DOWNLOAD_PRESETS[(src && src.preset) || 'video-best'];
-  const alt = preset.download_type === 'audio' ? DOWNLOAD_PRESETS['video-best'] : DOWNLOAD_PRESETS['audio-mp3'];
+  const { yes, alt } = presetPair(src);
   return {
     id: v.id,
     title: v.title,
@@ -645,11 +665,11 @@ function videoView(v) {
     sentAt: v.sentAt || null,
     error: v.error || null,
     failed: !!v.failed,
-    label: v.options ? v.options.label : null,
-    source: src ? src.title : '(entfernte Quelle)',
-    yesLabel: preset.label,
-    altLabel: alt.label,
-    altType: alt.download_type,
+    preset: v.options ? presetIdOf(v.options) : null,
+    source: src ? src.title : null,
+    yesPreset: yes,
+    altPreset: alt,
+    altType: DOWNLOAD_PRESETS[alt].download_type,
   };
 }
 
@@ -662,6 +682,8 @@ function pendingSorted() {
 const routes = {
   'GET /api/health': () => ({ status: 'ok', commit: COMMIT }),
 
+  'GET /api/config': () => ({ language: LANGUAGE, duplicates: DUPLICATES, commit: COMMIT }),
+
   'GET /api/status': () => {
     const nextPoll = lastPollAt ? lastPollAt + POLL_MINUTES * 60000 : null;
     return {
@@ -671,7 +693,7 @@ const routes = {
       checking,
       nextPoll,
       pollMinutes: POLL_MINUTES,
-      duplicates: state.duplicates ? state.duplicates.groups.length : 0,
+      duplicates: DUPLICATES && state.duplicates ? state.duplicates.groups.length : 0,
     };
   },
 
@@ -681,11 +703,11 @@ const routes = {
     return { total: all.length, items: all.slice(0, limit).map(videoView) };
   },
 
-  'POST /api/decide': (req, url, body) => {
+  'POST /api/decide': (req, url, body, t) => {
     const v = state.videos[body.id];
-    if (!v) return [404, { error: 'Unbekanntes Video' }];
-    if (!['yes', 'alt', 'no'].includes(body.decision)) return [400, { error: 'decision: yes, alt oder no' }];
-    if (v.status === 'yes' && v.sentAt) return [409, { error: 'Schon an MeTube geschickt' }];
+    if (!v) return [404, { error: t('err.unknownVideo') }];
+    if (!['yes', 'alt', 'no'].includes(body.decision)) return [400, { error: 'decision must be yes, alt or no' }];
+    if (v.status === 'yes' && v.sentAt) return [409, { error: t('err.alreadySent') }];
     v.decidedAt = Date.now();
     delete v.sentAt;
     delete v.error;
@@ -695,21 +717,20 @@ const routes = {
       v.status = 'no';
       delete v.options;
     } else {
-      const src = state.sources.find((s) => s.id === v.sourceId);
-      const preset = DOWNLOAD_PRESETS[(src && src.preset) || 'video-best'];
-      const alt = preset.download_type === 'audio' ? DOWNLOAD_PRESETS['video-best'] : DOWNLOAD_PRESETS['audio-mp3'];
+      const pair = presetPair(state.sources.find((s) => s.id === v.sourceId));
+      const preset = body.decision === 'alt' ? pair.alt : pair.yes;
       v.status = 'yes';
-      v.options = { ...(body.decision === 'alt' ? alt : preset) };
+      v.options = { preset, ...DOWNLOAD_PRESETS[preset] };
       v.sendAt = Date.now() + SEND_DELAY_MS;
     }
     save();
     return { ok: true, sendInSeconds: v.status === 'yes' ? SEND_DELAY_MS / 1000 : null };
   },
 
-  // Zurück in den Stapel. War es schon bei MeTube, bleibt der Download dort.
-  'POST /api/undo': (req, url, body) => {
+  // Back into the stack. If it already went to MeTube, the download stays there.
+  'POST /api/undo': (req, url, body, t) => {
     const v = state.videos[body.id];
-    if (!v) return [404, { error: 'Unbekanntes Video' }];
+    if (!v) return [404, { error: t('err.unknownVideo') }];
     const alreadySent = v.status === 'yes' && !!v.sentAt;
     v.status = 'pending';
     v.foundAt = Date.now();
@@ -718,9 +739,9 @@ const routes = {
     return { ok: true, alreadySent };
   },
 
-  'POST /api/retry': (req, url, body) => {
+  'POST /api/retry': (req, url, body, t) => {
     const v = state.videos[body.id];
-    if (!v || v.status !== 'yes' || v.sentAt) return [400, { error: 'Nichts zu wiederholen' }];
+    if (!v || v.status !== 'yes' || v.sentAt) return [400, { error: t('err.nothingToRetry') }];
     v.failed = false;
     v.attempts = 0;
     v.sendAt = Date.now();
@@ -741,13 +762,13 @@ const routes = {
 
   'GET /api/sources': () => ({
     sources: state.sources.map(sourceView),
-    presets: Object.entries(DOWNLOAD_PRESETS).map(([id, p]) => ({ id, label: p.label })),
+    presets: Object.keys(DOWNLOAD_PRESETS),
   }),
 
-  'POST /api/sources': async (req, url, body) => {
+  'POST /api/sources': async (req, url, body, t) => {
     const n = normalizeSource(body.url);
-    if (n.error) return [400, { error: n.error }];
-    if (state.sources.some((s) => s.key === n.key)) return [409, { error: 'Diese Quelle gibt es schon.' }];
+    if (n.error) return [400, { error: t(n.error) }];
+    if (state.sources.some((s) => s.key === n.key)) return [409, { error: t('err.sourceExists') }];
     const initial = Number.isInteger(body.initial) ? body.initial : 10;
     const src = {
       id: crypto.randomUUID(),
@@ -768,10 +789,10 @@ const routes = {
       const { added } = await checkSource(src);
       return { source: sourceView(src), added };
     } catch (e) {
-      // Was sich beim ersten Mal nicht lesen lässt, nicht stehen lassen.
+      // A source that cannot be read the first time is not kept.
       state.sources = state.sources.filter((s) => s !== src);
       save();
-      return [400, { error: 'MeTube konnte die Quelle nicht lesen: ' + e.message }];
+      return [400, { error: t('err.unreadableSource', { error: e.message }) }];
     }
   },
 
@@ -779,23 +800,27 @@ const routes = {
     poll(true);
     return { ok: true };
   },
+};
 
+const duplicateRoutes = {
   'GET /api/duplicates': () => {
     const d = state.duplicates;
     const nextScan = d && d.scannedAt ? d.scannedAt + DUP_HOURS * 3600000 : null;
     return { ...(d || { groups: [] }), scanning: !!dupScanning, dupHours: DUP_HOURS, nextScan };
   },
 
-  // Antwortet sofort; die Seite fragt nach, bis scanning wieder false ist.
+  // Answers right away; the page asks again until scanning is false.
   'POST /api/duplicates/scan': () => {
     scanDuplicates();
     return { ok: true, scanning: true };
   },
 
-  'POST /api/duplicates/delete': (req, url, body) => trashDuplicate(body.root, body.rel),
+  'POST /api/duplicates/delete': (req, url, body, t) => trashDuplicate(body.root, body.rel, t),
 
-  'POST /api/duplicates/empty-trash': () => emptyTrash(),
+  'POST /api/duplicates/empty-trash': (req, url, body, t) => emptyTrash(t),
 };
+
+if (DUPLICATES) Object.assign(routes, duplicateRoutes);
 
 const sourceRoutes = {
   PATCH: (src, body) => {
@@ -804,7 +829,7 @@ const sourceRoutes = {
     save();
     return { source: sourceView(src) };
   },
-  // Entscheidungen bleiben: ein Nein soll auch nach erneutem Hinzufügen gelten.
+  // Decisions stay: a no should still count after the source is added again.
   DELETE: (src) => {
     state.sources = state.sources.filter((s) => s !== src);
     for (const [id, v] of Object.entries(state.videos)) {
@@ -813,8 +838,8 @@ const sourceRoutes = {
     save();
     return { ok: true };
   },
-  POST: async (src) => {
-    if (checking === src.id) return [409, { error: 'Wird gerade geprüft' }];
+  POST: async (src, body, t) => {
+    if (checking === src.id) return [409, { error: t('err.checking') }];
     try {
       return { ...(await checkSource(src)), source: sourceView(src) };
     } catch (e) {
@@ -833,6 +858,24 @@ const TYPES = {
   '.webmanifest': 'application/manifest+json',
 };
 
+function translatorFor(req) {
+  return i18n.translator(LANGUAGE !== 'auto' ? LANGUAGE : i18n.pick(req.headers['accept-language']));
+}
+
+function digest(text) {
+  return crypto.createHash('sha256').update(text).digest();
+}
+
+const AUTH_DIGEST = AUTH_USER ? digest(`${AUTH_USER}:${AUTH_PASSWORD}`) : null;
+
+// Optional HTTP Basic auth for setups without a login in front of TubeSwipe.
+function authorized(req) {
+  if (!AUTH_DIGEST) return true;
+  const m = String(req.headers.authorization || '').match(/^Basic\s+(\S+)$/i);
+  if (!m) return false;
+  return crypto.timingSafeEqual(digest(Buffer.from(m[1], 'base64').toString('utf8')), AUTH_DIGEST);
+}
+
 function send(res, code, data) {
   const body = JSON.stringify(data);
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -846,7 +889,7 @@ function readBody(req) {
     req.on('data', (c) => {
       size += c.length;
       if (size > 65536) {
-        reject(Object.assign(new Error('Zu gross'), { code: 413 }));
+        reject(Object.assign(new Error('Too large'), { code: 413 }));
         req.destroy();
       } else chunks.push(c);
     });
@@ -855,7 +898,7 @@ function readBody(req) {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
       } catch {
-        reject(Object.assign(new Error('Kein gültiges JSON'), { code: 400 }));
+        reject(Object.assign(new Error('Invalid JSON'), { code: 400 }));
       }
     });
     req.on('error', reject);
@@ -865,9 +908,9 @@ function readBody(req) {
 function serveStatic(res, pathname) {
   const rel = pathname === '/' ? 'index.html' : pathname.slice(1);
   const file = path.join(PUBLIC_DIR, path.normalize(rel));
-  if (!file.startsWith(PUBLIC_DIR + path.sep)) return send(res, 404, { error: 'Nicht gefunden' });
+  if (!file.startsWith(PUBLIC_DIR + path.sep)) return send(res, 404, { error: 'Not found' });
   fs.readFile(file, (err, data) => {
-    if (err) return send(res, 404, { error: 'Nicht gefunden' });
+    if (err) return send(res, 404, { error: 'Not found' });
     res.writeHead(200, { 'content-type': TYPES[path.extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache' });
     res.end(data);
   });
@@ -876,26 +919,31 @@ function serveStatic(res, pathname) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
+    if (!(req.method === 'GET' && url.pathname === '/api/health') && !authorized(req)) {
+      res.writeHead(401, { 'www-authenticate': 'Basic realm="TubeSwipe", charset="UTF-8"', 'content-type': 'text/plain; charset=utf-8' });
+      return res.end('Authentication required');
+    }
     if (!url.pathname.startsWith('/api/')) {
-      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Nicht erlaubt' });
+      if (req.method !== 'GET' && req.method !== 'HEAD') return send(res, 405, { error: 'Method not allowed' });
       return serveStatic(res, url.pathname);
     }
-    // Nur JSON annehmen: ein fremdes Formular kann diesen Typ nicht ohne
-    // CORS-Vorabfrage schicken, und die beantwortet der Server nicht.
+    // Only accept JSON: a foreign form cannot send this type without a CORS
+    // preflight, and the server never answers one.
     if (req.method !== 'GET' && !String(req.headers['content-type'] || '').startsWith('application/json')) {
-      return send(res, 415, { error: 'Nur application/json' });
+      return send(res, 415, { error: 'Only application/json' });
     }
     const body = req.method === 'GET' ? {} : await readBody(req);
+    const t = translatorFor(req);
     let handler = routes[`${req.method} ${url.pathname}`];
     let result;
     if (handler) {
-      result = await handler(req, url, body);
+      result = await handler(req, url, body, t);
     } else {
       const m = url.pathname.match(/^\/api\/sources\/([\w-]+)$/);
       const src = m && state.sources.find((s) => s.id === m[1]);
       handler = src && sourceRoutes[req.method];
-      if (!handler) return send(res, 404, { error: 'Nicht gefunden' });
-      result = await handler(src, body);
+      if (!handler) return send(res, 404, { error: 'Not found' });
+      result = await handler(src, body, t);
     }
     if (Array.isArray(result)) send(res, result[0], result[1]);
     else send(res, 200, result);
@@ -906,15 +954,18 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`TubeSwipe ${COMMIT} auf Port ${PORT}, MeTube ${METUBE_URL}, Prüfung alle ${POLL_MINUTES} min`);
+  const extras = [DUPLICATES && `duplicates in ${MEDIA_DIR}`, AUTH_DIGEST && 'basic auth'].filter(Boolean);
+  console.log(`TubeSwipe ${COMMIT} on port ${server.address().port}, MeTube ${METUBE_URL}, checking every ${POLL_MINUTES} min${extras.length ? ', ' + extras.join(', ') : ''}`);
 });
 
 setTimeout(() => poll(false), 10000);
 setInterval(() => poll(false), 60000);
 setInterval(sendDue, 2000);
-// Doppelte: kurz nach dem Start nachholen, falls fällig, danach alle 10 min nachsehen.
-setTimeout(dupDue, 30000);
-setInterval(dupDue, 10 * 60000);
+if (DUPLICATES) {
+  // Catch up shortly after the start if a scan is due, then look every 10 min.
+  setTimeout(dupDue, 30000);
+  setInterval(dupDue, 10 * 60000);
+}
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {

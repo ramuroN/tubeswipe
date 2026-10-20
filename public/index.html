@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -13,10 +13,10 @@
     <header>
       <h1>TubeSwipe</h1>
       <nav>
-        <button data-tab="stack" class="active">Stapel <span id="count" class="badge"></span></button>
-        <button data-tab="sources">Quellen</button>
-        <button data-tab="history">Verlauf</button>
-        <button data-tab="duplicates">Doppelte <span id="dup-count" class="badge"></span></button>
+        <button data-tab="stack" class="active"><span data-i18n="tab.stack">Stack</span> <span id="count" class="badge"></span></button>
+        <button data-tab="sources" data-i18n="tab.sources">Sources</button>
+        <button data-tab="history" data-i18n="tab.history">History</button>
+        <button data-tab="duplicates"><span data-i18n="tab.duplicates">Duplicates</span> <span id="dup-count" class="badge"></span></button>
       </nav>
     </header>
 
@@ -24,48 +24,39 @@
       <section id="tab-stack" class="tab active">
         <div id="deck"></div>
         <div id="empty" hidden>
-          <p class="big">Alles durchgeswipt.</p>
+          <p class="big" data-i18n="stack.empty">All swiped through.</p>
           <p id="empty-info" class="muted"></p>
-          <button id="check-all" class="secondary">Jetzt alle Quellen prüfen</button>
+          <button id="check-all" class="secondary" data-i18n="stack.checkAll">Check all sources now</button>
         </div>
         <div id="controls">
-          <button id="btn-no" class="round no" title="Nein (←)" aria-label="Nein">✕</button>
-          <button id="btn-undo" class="round small" title="Zurück (Z)" aria-label="Zurück" disabled>↶</button>
-          <button id="btn-alt" class="round small alt" title="Andere Art (↑)" aria-label="Andere Art">♪</button>
-          <button id="btn-yes" class="round yes" title="Ja (→)" aria-label="Ja">✓</button>
+          <button id="btn-no" class="round no" data-i18n-title="btn.noTitle" data-i18n-aria="btn.no" title="No (←)" aria-label="No">✕</button>
+          <button id="btn-undo" class="round small" data-i18n-title="btn.undoTitle" data-i18n-aria="btn.undo" title="Undo (Z)" aria-label="Undo" disabled>↶</button>
+          <button id="btn-alt" class="round small alt" data-i18n-aria="btn.alt" title="Other format (↑)" aria-label="Other format">♪</button>
+          <button id="btn-yes" class="round yes" data-i18n-aria="btn.yes" title="Yes (→)" aria-label="Yes">✓</button>
         </div>
-        <p id="hint" class="muted">→ Ja · ← Nein · ↑ <span id="hint-alt">Audio</span> · Z zurück · Leertaste Vorschau</p>
+        <p id="hint" class="muted"></p>
       </section>
 
       <section id="tab-sources" class="tab">
         <form id="add-form">
           <label>
-            Kanal oder Playlist
-            <input id="add-url" type="url" placeholder="https://www.youtube.com/@kanal oder …/playlist?list=…" required />
+            <span data-i18n="sources.url">Channel or playlist</span>
+            <input id="add-url" type="url" data-i18n-placeholder="sources.placeholder" placeholder="https://www.youtube.com/@channel or …/playlist?list=…" required />
           </label>
           <div class="row">
             <label>
-              Bestehende Videos vorschlagen
-              <select id="add-initial">
-                <option value="0">keine, nur neue</option>
-                <option value="5">die letzten 5</option>
-                <option value="10" selected>die letzten 10</option>
-                <option value="25">die letzten 25</option>
-                <option value="-1">alle</option>
-              </select>
+              <span data-i18n="sources.initial">Suggest existing videos</span>
+              <select id="add-initial"></select>
             </label>
             <label>
-              Bei Ja laden als
+              <span data-i18n="sources.preset">On yes, download as</span>
               <select id="add-preset"></select>
             </label>
           </div>
-          <button type="submit" id="add-btn">Hinzufügen</button>
+          <button type="submit" id="add-btn" data-i18n="sources.add">Add</button>
           <p id="add-msg" class="muted"></p>
         </form>
-        <p class="muted note">
-          Private Playlists und «Später ansehen» kann MeTube ohne Login nicht lesen. Lege dafür eine
-          <strong>nicht gelistete</strong> Playlist an und speichere Videos dort hinein.
-        </p>
+        <p class="muted note" data-i18n-html="sources.note"></p>
         <ul id="source-list" class="list"></ul>
       </section>
 
@@ -76,18 +67,19 @@
       <section id="tab-duplicates" class="tab">
         <div class="dup-head">
           <p id="dup-info" class="muted note"></p>
-          <button id="dup-scan" class="secondary">Jetzt prüfen</button>
+          <button id="dup-scan" class="secondary" data-i18n="dup.scan">Scan now</button>
         </div>
         <div class="dup-head">
           <p id="dup-trash" class="muted note"></p>
-          <button id="dup-empty" class="secondary">Papierkorb leeren</button>
+          <button id="dup-empty" class="secondary" data-i18n="dup.emptyTrash">Empty trash</button>
         </div>
         <ul id="dup-list" class="list"></ul>
       </section>
     </main>
 
-    <div id="toast" hidden><span id="toast-text"></span><button id="toast-undo">Zurück</button></div>
+    <div id="toast" hidden><span id="toast-text"></span><button id="toast-undo" data-i18n="btn.undo">Undo</button></div>
 
+    <script src="i18n.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

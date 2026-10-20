@@ -1,0 +1,32 @@
+# TubeSwipe together with MeTube. Start with `docker compose up -d`, then open
+# http://localhost:3000 (TubeSwipe) and http://localhost:8081 (MeTube).
+# Neither has a login of its own: keep both inside your network, put a reverse
+# proxy with authentication in front, or set AUTH_USER and AUTH_PASSWORD below.
+
+services:
+  tubeswipe:
+    image: ghcr.io/ramuron/tubeswipe:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      METUBE_URL: http://metube:8081
+      # UI_LANGUAGE: en        # auto (default, follows the browser), en or de
+      # POLL_MINUTES: "60"     # how often every source is checked
+      # AUTH_USER: swiper      # optional HTTP basic auth, set both
+      # AUTH_PASSWORD: change-me
+    volumes:
+      - tubeswipe-data:/data
+    depends_on:
+      - metube
+
+  metube:
+    image: ghcr.io/alexta69/metube:latest
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./downloads:/downloads
+
+volumes:
+  tubeswipe-data:

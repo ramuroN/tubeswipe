@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+data
+docs
+test
+node_modules
+*.md
+compose.yml

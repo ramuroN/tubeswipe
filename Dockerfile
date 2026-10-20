@@ -1,5 +1,5 @@
-# TubeSwipe: nur Node, keine Pakete. Alles, was die App schreibt, liegt in /data.
-FROM node:22-alpine
+# TubeSwipe: Node only, no packages. Everything the app writes lives in /data.
+FROM node:24-alpine
 
 WORKDIR /app
 COPY server.js COMMIT* ./

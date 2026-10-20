@@ -1,0 +1,16 @@
+{
+  "name": "tubeswipe",
+  "version": "1.0.0",
+  "description": "Swipe through new videos from YouTube channels and playlists and send the ones you want to MeTube.",
+  "license": "MIT",
+  "private": true,
+  "main": "server.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test \"test/*.test.js\"",
+    "mock": "node test/mock-metube.js"
+  }
+}
